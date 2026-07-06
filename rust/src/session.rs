@@ -2230,37 +2230,66 @@ async fn handle_request(
                 .and_then(|p| p.get("allowFreeform"))
                 .and_then(|v| v.as_bool());
 
-            let handler_start = Instant::now();
-            let response = if let Some(user_input_handler) = handlers.user_input.as_ref() {
-                user_input_handler
-                    .handle(sid.clone(), question, choices, allow_freeform)
-                    .await
-            } else {
-                None
-            };
-            tracing::debug!(
-                elapsed_ms = handler_start.elapsed().as_millis(),
-                session_id = %sid,
-                "UserInputHandler::handle dispatch"
+            // Dispatch the user-input handler on a spawned task — mirroring
+            // the permission/elicitation dispatch pattern above — instead of
+            // awaiting it inline on the session event loop. A handler that
+            // waits for a real human answer would otherwise block ALL
+            // notification/event processing for the session for the duration
+            // of the ask. The nested spawn catches handler panics as
+            // JoinErrors, degrading to `noResponse` exactly like an absent
+            // handler.
+            let user_input_handler = handlers.user_input.clone();
+            let client = client.clone();
+            let request_id = request.id;
+            let sid_task = sid.clone();
+            let span = tracing::error_span!(
+                "user_input_request_handler",
+                session_id = %sid_task
             );
+            tokio::spawn(
+                async move {
+                    let handler_task = tokio::spawn({
+                        let sid = sid_task.clone();
+                        async move {
+                            let handler_start = Instant::now();
+                            let response =
+                                if let Some(user_input_handler) = user_input_handler.as_ref() {
+                                    user_input_handler
+                                        .handle(sid.clone(), question, choices, allow_freeform)
+                                        .await
+                                } else {
+                                    None
+                                };
+                            tracing::debug!(
+                                elapsed_ms = handler_start.elapsed().as_millis(),
+                                session_id = %sid,
+                                "UserInputHandler::handle dispatch"
+                            );
+                            response
+                        }
+                    });
+                    let response = handler_task.await.unwrap_or(None);
 
-            let rpc_result = match response {
-                Some(UserInputResponse {
-                    answer,
-                    was_freeform,
-                }) => serde_json::json!({
-                    "answer": answer,
-                    "wasFreeform": was_freeform,
-                }),
-                None => serde_json::json!({ "noResponse": true }),
-            };
-            let rpc_response = JsonRpcResponse {
-                jsonrpc: "2.0".to_string(),
-                id: request.id,
-                result: Some(rpc_result),
-                error: None,
-            };
-            let _ = client.send_response(&rpc_response).await;
+                    let rpc_result = match response {
+                        Some(UserInputResponse {
+                            answer,
+                            was_freeform,
+                        }) => serde_json::json!({
+                            "answer": answer,
+                            "wasFreeform": was_freeform,
+                        }),
+                        None => serde_json::json!({ "noResponse": true }),
+                    };
+                    let rpc_response = JsonRpcResponse {
+                        jsonrpc: "2.0".to_string(),
+                        id: request_id,
+                        result: Some(rpc_result),
+                        error: None,
+                    };
+                    let _ = client.send_response(&rpc_response).await;
+                }
+                .instrument(span),
+            );
         }
 
         "exitPlanMode.request" => {
