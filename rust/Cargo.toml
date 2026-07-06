@@ -58,8 +58,8 @@ base64 = "0.22"
 bytes = "1"
 http = "1"
 futures-util = "0.3"
-reqwest = { version = "0.12", default-features = false, features = ["stream", "http2", "default-tls"] }
-tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "native-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["stream", "http2", "rustls-tls"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-native-roots", "rustls-tls-webpki-roots"] }
 
 [target.'cfg(windows)'.dependencies]
 zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
