@@ -1,6 +1,6 @@
 [package]
 name = "github-copilot-sdk"
-version = "0.0.0-dev"
+version = "1.0.6-preview.1"
 edition = "2024"
 rust-version = "1.94.0"
 description = "Rust SDK for programmatic control of the GitHub Copilot CLI via JSON-RPC."
