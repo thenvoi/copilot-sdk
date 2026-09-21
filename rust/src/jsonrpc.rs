@@ -7,7 +7,7 @@ use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{Instrument, debug, error, warn};
 
@@ -194,6 +194,7 @@ struct WriteCommand {
 /// full RFD-400 reasoning.
 pub struct JsonRpcClient {
     request_id: AtomicU64,
+    disconnected: watch::Sender<bool>,
     /// Sender side of the writer actor's command queue. Public methods
     /// pre-serialize their frames and enqueue here; the background actor
     /// drains the queue and serializes writes onto the underlying
@@ -223,13 +224,24 @@ impl JsonRpcClient {
     ) -> Self {
         let (write_tx, write_rx) = mpsc::unbounded_channel::<WriteCommand>();
 
+        let (disconnected, _) = watch::channel(false);
+        let pending_requests = Arc::new(RwLock::new(HashMap::new()));
         let writer_span = tracing::error_span!("jsonrpc_write_loop");
-        let write_task = tokio::spawn(Self::write_loop(writer, write_rx).instrument(writer_span));
+        let write_task = tokio::spawn(
+            Self::write_loop(
+                writer,
+                write_rx,
+                disconnected.clone(),
+                pending_requests.clone(),
+            )
+            .instrument(writer_span),
+        );
 
         let client = Self {
             request_id: AtomicU64::new(1),
             write_tx,
-            pending_requests: Arc::new(RwLock::new(HashMap::new())),
+            pending_requests,
+            disconnected,
             notification_tx,
             request_tx,
             read_task: Mutex::new(None),
@@ -240,6 +252,7 @@ impl JsonRpcClient {
         let notification_tx_clone = client.notification_tx.clone();
         let request_tx_clone = client.request_tx.clone();
         let reader_span = tracing::error_span!("jsonrpc_read_loop");
+        let disconnected = client.disconnected.clone();
 
         let read_task = tokio::spawn(
             async move {
@@ -248,6 +261,7 @@ impl JsonRpcClient {
                     pending_requests,
                     notification_tx_clone,
                     request_tx_clone,
+                    disconnected,
                 )
                 .await;
             }
@@ -258,7 +272,17 @@ impl JsonRpcClient {
         client
     }
 
+    pub(crate) fn is_disconnected(&self) -> bool {
+        *self.disconnected.borrow()
+    }
+
+    pub(crate) async fn wait_for_disconnect(&self) {
+        let mut receiver = self.disconnected.subscribe();
+        let _ = receiver.wait_for(|closed| *closed).await;
+    }
+
     pub(crate) fn force_close(&self) {
+        self.disconnected.send_replace(true);
         if let Some(task) = self.read_task.lock().take() {
             task.abort();
         }
@@ -283,19 +307,38 @@ impl JsonRpcClient {
     async fn write_loop(
         mut writer: impl AsyncWrite + Unpin + Send + 'static,
         mut rx: mpsc::UnboundedReceiver<WriteCommand>,
+        disconnected: watch::Sender<bool>,
+        pending_requests: Arc<RwLock<HashMap<u64, PendingRequest>>>,
     ) {
-        while let Some(WriteCommand { frame, ack }) = rx.recv().await {
-            let result = async {
-                writer.write_all(&frame).await?;
-                writer.flush().await?;
-                Ok::<_, std::io::Error>(())
+        let mut closed = disconnected.subscribe();
+        loop {
+            let command = tokio::select! {
+                biased;
+                _ = closed.wait_for(|value| *value) => break,
+                command = rx.recv() => command,
+            };
+            let Some(WriteCommand { frame, ack }) = command else {
+                break;
+            };
+            let result = tokio::select! {
+                biased;
+                _ = closed.wait_for(|value| *value) => break,
+                result = async {
+                    writer.write_all(&frame).await?;
+                    writer.flush().await?;
+                    Ok::<_, std::io::Error>(())
+                } => result,
+            };
+            let failed = result.is_err();
+            if failed {
+                disconnected.send_replace(true);
+                pending_requests.write().clear();
             }
-            .await;
-
-            // Caller may have dropped the ack receiver (e.g. their
-            // `await` was cancelled); that's fine — we still completed
-            // the write, which was the whole point.
+            // Cancellation of the caller does not cancel the committed write.
             let _ = ack.send(result);
+            if failed {
+                break;
+            }
         }
     }
 
@@ -304,11 +347,18 @@ impl JsonRpcClient {
         pending_requests: Arc<RwLock<HashMap<u64, PendingRequest>>>,
         notification_tx: broadcast::Sender<JsonRpcNotification>,
         request_tx: mpsc::UnboundedSender<JsonRpcRequest>,
+        disconnected: watch::Sender<bool>,
     ) {
         let mut reader = BufReader::new(reader);
+        let mut closed = disconnected.subscribe();
 
         loop {
-            match Self::read_message(&mut reader).await {
+            let message = tokio::select! {
+                biased;
+                _ = closed.wait_for(|value| *value) => break,
+                message = Self::read_message(&mut reader) => message,
+            };
+            match message {
                 Ok(Some(message)) => match message {
                     JsonRpcMessage::Response(mut response) => {
                         let id = response.id;
@@ -383,6 +433,7 @@ impl JsonRpcClient {
             }
         }
 
+        disconnected.send_replace(true);
         // Drain in-flight requests so callers observe cancellation
         // instead of hanging on a oneshot receiver.
         let mut pending = pending_requests.write();
@@ -479,13 +530,19 @@ impl JsonRpcClient {
         let request = JsonRpcRequest::new(id, method, params);
 
         let (tx, rx) = oneshot::channel();
-        self.pending_requests.write().insert(
-            id,
-            PendingRequest {
-                sender: tx,
-                inline_callback,
-            },
-        );
+        {
+            let mut pending = self.pending_requests.write();
+            if self.is_disconnected() {
+                return Err(ErrorKind::Protocol(ProtocolErrorKind::RequestCancelled).into());
+            }
+            pending.insert(
+                id,
+                PendingRequest {
+                    sender: tx,
+                    inline_callback,
+                },
+            );
+        }
 
         // RAII guard that removes the pending entry if this future is
         // dropped before the response arrives. Disarmed below before the
@@ -559,6 +616,9 @@ impl JsonRpcClient {
     /// drops the ack receiver; the actor still completes the frame and
     /// flushes. A partial frame can never appear on the wire.
     pub async fn write<T: serde::Serialize>(&self, message: &T) -> Result<(), Error> {
+        if self.is_disconnected() {
+            return Err(ErrorKind::Protocol(ProtocolErrorKind::RequestCancelled).into());
+        }
         let body = serde_json::to_vec(message)?;
         let mut frame = Vec::with_capacity(CONTENT_LENGTH_HEADER.len() + 16 + body.len() + 4);
         frame.extend_from_slice(CONTENT_LENGTH_HEADER.as_bytes());
