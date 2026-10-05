@@ -13,7 +13,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use github_copilot_sdk::handler::{ApproveAllHandler, UserInputHandler, UserInputResponse};
+use github_copilot_sdk::handler::{
+    ApproveAllHandler, UserInputError, UserInputHandler, UserInputResponse,
+};
 use github_copilot_sdk::types::{MessageOptions, SessionConfig, SessionEvent, SessionId};
 use github_copilot_sdk::{Client, ClientOptions};
 
@@ -28,14 +30,16 @@ impl UserInputHandler for StdinUserInputHandler {
         question: String,
         _choices: Option<Vec<String>>,
         _allow_freeform: Option<bool>,
-    ) -> Option<UserInputResponse> {
+    ) -> Result<Option<UserInputResponse>, UserInputError> {
         print!("\n[agent asks] {question}\n> ");
         io::stdout().flush().ok();
-        let answer = read_line()?;
-        Some(UserInputResponse {
+        let Some(answer) = read_line() else {
+            return Ok(None); // EOF: no answer available
+        };
+        Ok(Some(UserInputResponse {
             answer,
             was_freeform: true,
-        })
+        }))
     }
 }
 

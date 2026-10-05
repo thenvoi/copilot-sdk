@@ -92,6 +92,21 @@ pub struct UserInputResponse {
     pub was_freeform: bool,
 }
 
+/// The single bounded error a [`UserInputHandler`] may return to decline
+/// admitting a request.
+///
+/// The SDK maps it to exactly one JSON-RPC error shape — the fixed
+/// admission-rejection class (`error_codes::USER_INPUT_ADMISSION_REJECTED`)
+/// with a fixed message and no `data` — so the wire representation is
+/// bounded and can never carry the question, choices, or any other request
+/// content. Policy for *when* to reject lives entirely in the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserInputError {
+    /// Admission declined: the host refuses to present this request.
+    /// Serialized as the fixed rejection class; carries no payload.
+    AdmissionRejected,
+}
+
 /// Result of an exit-plan-mode request.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -239,15 +254,20 @@ pub trait McpAuthHandler: Send + Sync + 'static {
 /// `ask_user` tool is disabled for the session.
 #[async_trait]
 pub trait UserInputHandler: Send + Sync + 'static {
-    /// Answer a question on behalf of the user. Return `None` to signal
-    /// "no answer available".
+    /// Answer a question on behalf of the user.
+    ///
+    /// * `Ok(Some(response))` — the answer, delivered as the RPC result.
+    /// * `Ok(None)` — "no answer available"; settled as the unchanged
+    ///   `noResponse` success result.
+    /// * `Err(UserInputError)` — decline admission; settled exactly once as
+    ///   the fixed bounded JSON-RPC error class (never request content).
     async fn handle(
         &self,
         session_id: SessionId,
         question: String,
         choices: Option<Vec<String>>,
         allow_freeform: Option<bool>,
-    ) -> Option<UserInputResponse>;
+    ) -> Result<Option<UserInputResponse>, UserInputError>;
 }
 
 /// Handler for `exit_plan_mode.requested` events. When unset,

@@ -476,7 +476,7 @@ Some sessions ask the user free-form questions (or multiple-choice prompts) outs
 
 ```rust,ignore
 use async_trait::async_trait;
-use github_copilot_sdk::handler::{UserInputHandler, UserInputResponse};
+use github_copilot_sdk::handler::{UserInputError, UserInputHandler, UserInputResponse};
 use github_copilot_sdk::types::SessionId;
 
 struct MyUserInput;
@@ -489,12 +489,12 @@ impl UserInputHandler for MyUserInput {
         question: String,
         _choices: Option<Vec<String>>,
         _allow_freeform: Option<bool>,
-    ) -> Option<UserInputResponse> {
+    ) -> Result<Option<UserInputResponse>, UserInputError> {
         // Render `question` + `choices` to your UI, then:
-        Some(UserInputResponse {
+        Ok(Some(UserInputResponse {
             answer: "Yes".to_string(),
             was_freeform: false,
-        })
+        }))
     }
 }
 
@@ -502,7 +502,7 @@ let config = SessionConfig::default()
     .with_user_input_handler(Arc::new(MyUserInput));
 ```
 
-Return `None` to signal "no answer available" (the CLI falls back to its own prompt).
+Return `Ok(None)` to signal "no answer available" (the CLI falls back to its own prompt). Return `Err(UserInputError::AdmissionRejected)` to decline admitting the request: the SDK answers the RPC exactly once with a fixed JSON-RPC error (code `-32000`, no payload — the question and choices never go back on the wire). When to reject is host policy; the SDK only provides the capability.
 
 ### Slash Commands
 
