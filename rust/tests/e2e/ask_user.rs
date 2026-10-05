@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use github_copilot_sdk::handler::{
-    PermissionHandler, PermissionResult, UserInputHandler, UserInputResponse,
+    PermissionHandler, PermissionResult, UserInputError, UserInputHandler, UserInputResponse,
 };
 use github_copilot_sdk::{RequestId, SessionConfig, SessionId};
 use tokio::sync::mpsc;
@@ -172,7 +172,7 @@ impl UserInputHandler for RecordingUserInputHandler {
         question: String,
         choices: Option<Vec<String>>,
         allow_freeform: Option<bool>,
-    ) -> Option<UserInputResponse> {
+    ) -> Result<Option<UserInputResponse>, UserInputError> {
         let _ = self.request_tx.send(RecordedUserInputRequest {
             session_id,
             question,
@@ -186,10 +186,10 @@ impl UserInputHandler for RecordingUserInputHandler {
             }
             (UserInputAnswer::Freeform(answer), _) => ((*answer).to_string(), true),
         };
-        Some(UserInputResponse {
+        Ok(Some(UserInputResponse {
             answer,
             was_freeform,
-        })
+        }))
     }
 }
 

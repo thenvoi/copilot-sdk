@@ -10,7 +10,7 @@ use github_copilot_sdk::canvas::{CanvasDeclaration, CanvasHandler, CanvasResult}
 use github_copilot_sdk::handler::{
     ApproveAllHandler, AutoModeSwitchHandler, AutoModeSwitchResponse, ElicitationHandler,
     ExitPlanModeHandler, ExitPlanModeResult, McpAuthHandler, McpAuthRequest, McpAuthResult,
-    UserInputHandler, UserInputResponse,
+    UserInputError, UserInputHandler, UserInputResponse,
 };
 use github_copilot_sdk::rpc::{
     CanvasProviderInvokeActionRequest, CanvasProviderOpenRequest, CanvasProviderOpenResult,
@@ -2013,12 +2013,12 @@ async fn user_input_request_dispatches_to_handler() {
             question: String,
             _choices: Option<Vec<String>>,
             _allow_freeform: Option<bool>,
-        ) -> Option<UserInputResponse> {
+        ) -> Result<Option<UserInputResponse>, UserInputError> {
             assert_eq!(question, "Pick a color");
-            Some(UserInputResponse {
+            Ok(Some(UserInputResponse {
                 answer: "blue".to_string(),
                 was_freeform: true,
-            })
+            }))
         }
     }
 
@@ -2177,12 +2177,12 @@ async fn user_input_requested_notification_does_not_double_dispatch() {
             _question: String,
             _choices: Option<Vec<String>>,
             _allow_freeform: Option<bool>,
-        ) -> Option<UserInputResponse> {
+        ) -> Result<Option<UserInputResponse>, UserInputError> {
             self.invocations.fetch_add(1, Ordering::SeqCst);
-            Some(UserInputResponse {
+            Ok(Some(UserInputResponse {
                 answer: "ok".to_string(),
                 was_freeform: true,
-            })
+            }))
         }
     }
 
@@ -2234,6 +2234,146 @@ async fn user_input_requested_notification_does_not_double_dispatch() {
     assert_eq!(response["id"], 301);
     assert_eq!(response["result"]["answer"], "ok");
     assert_eq!(invocations.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn user_input_error_settles_the_rpc_once_with_the_fixed_rejection_error() {
+    struct RejectingHandler;
+    #[async_trait]
+    impl UserInputHandler for RejectingHandler {
+        async fn handle(
+            &self,
+            _session_id: SessionId,
+            _question: String,
+            _choices: Option<Vec<String>>,
+            _allow_freeform: Option<bool>,
+        ) -> Result<Option<UserInputResponse>, UserInputError> {
+            Err(UserInputError::AdmissionRejected)
+        }
+    }
+
+    let (_session, mut server) = create_session_pair_with_config(|cfg| {
+        cfg.with_user_input_handler(Arc::new(RejectingHandler))
+    })
+    .await;
+    server
+        .send_request(
+            302,
+            "userInput.request",
+            serde_json::json!({
+                "sessionId": server.session_id,
+                "question": "Pick a color",
+                "choices": ["red", "blue"],
+                "allowFreeform": true,
+            }),
+        )
+        .await;
+
+    let response = timeout(TIMEOUT, server.read_response()).await.unwrap();
+    assert_eq!(response["id"], 302);
+    assert!(
+        response.get("result").is_none_or(|v| v.is_null()),
+        "an error settlement carries no result: {response}"
+    );
+    assert_eq!(
+        response["error"]["code"],
+        github_copilot_sdk::test_support::error_codes::USER_INPUT_ADMISSION_REJECTED
+    );
+    assert_eq!(
+        response["error"]["message"],
+        "user input admission rejected"
+    );
+    assert!(
+        response["error"].get("data").is_none_or(|d| d.is_null()),
+        "the rejection error carries no payload, and never request content: {response}"
+    );
+    assert!(
+        timeout(Duration::from_millis(150), server.read_response())
+            .await
+            .is_err(),
+        "the RPC must settle exactly once — no second frame may follow the error"
+    );
+}
+
+#[tokio::test]
+async fn user_input_ok_none_still_settles_as_no_response() {
+    struct SilentHandler;
+    #[async_trait]
+    impl UserInputHandler for SilentHandler {
+        async fn handle(
+            &self,
+            _session_id: SessionId,
+            _question: String,
+            _choices: Option<Vec<String>>,
+            _allow_freeform: Option<bool>,
+        ) -> Result<Option<UserInputResponse>, UserInputError> {
+            Ok(None)
+        }
+    }
+
+    let (_session, mut server) =
+        create_session_pair_with_config(|cfg| cfg.with_user_input_handler(Arc::new(SilentHandler)))
+            .await;
+    server
+        .send_request(
+            303,
+            "userInput.request",
+            serde_json::json!({
+                "sessionId": server.session_id,
+                "question": "Pick a color",
+            }),
+        )
+        .await;
+
+    let response = timeout(TIMEOUT, server.read_response()).await.unwrap();
+    assert_eq!(response["id"], 303);
+    assert_eq!(response["result"]["noResponse"], true);
+    assert!(
+        response.get("error").is_none_or(|e| e.is_null()),
+        "Ok(None) stays the unchanged noResponse success: {response}"
+    );
+}
+
+#[tokio::test]
+async fn user_input_handler_panic_still_degrades_to_no_response() {
+    struct PanickingHandler;
+    #[async_trait]
+    impl UserInputHandler for PanickingHandler {
+        async fn handle(
+            &self,
+            _session_id: SessionId,
+            _question: String,
+            _choices: Option<Vec<String>>,
+            _allow_freeform: Option<bool>,
+        ) -> Result<Option<UserInputResponse>, UserInputError> {
+            panic!("handler must degrade, not hang or double-settle")
+        }
+    }
+
+    let (_session, mut server) = create_session_pair_with_config(|cfg| {
+        cfg.with_user_input_handler(Arc::new(PanickingHandler))
+    })
+    .await;
+    server
+        .send_request(
+            304,
+            "userInput.request",
+            serde_json::json!({
+                "sessionId": server.session_id,
+                "question": "Pick a color",
+            }),
+        )
+        .await;
+
+    let response = timeout(TIMEOUT, server.read_response()).await.unwrap();
+    assert_eq!(response["id"], 304);
+    assert_eq!(response["result"]["noResponse"], true);
+    assert!(
+        timeout(Duration::from_millis(150), server.read_response())
+            .await
+            .is_err(),
+        "a panicking handler must not cause a second settlement"
+    );
 }
 
 #[tokio::test]
@@ -2592,12 +2732,12 @@ async fn stop_event_loop_completes_in_flight_handler() {
             _question: String,
             _choices: Option<Vec<String>>,
             _allow_freeform: Option<bool>,
-        ) -> Option<UserInputResponse> {
+        ) -> Result<Option<UserInputResponse>, UserInputError> {
             tokio::time::sleep(Duration::from_millis(150)).await;
-            Some(UserInputResponse {
+            Ok(Some(UserInputResponse {
                 answer: "completed".to_string(),
                 was_freeform: false,
-            })
+            }))
         }
     }
 
@@ -2670,13 +2810,13 @@ async fn drop_session_does_not_abort_handler() {
             _question: String,
             _choices: Option<Vec<String>>,
             _allow_freeform: Option<bool>,
-        ) -> Option<UserInputResponse> {
+        ) -> Result<Option<UserInputResponse>, UserInputError> {
             tokio::time::sleep(Duration::from_millis(100)).await;
             self.completed.store(true, Ordering::SeqCst);
-            Some(UserInputResponse {
+            Ok(Some(UserInputResponse {
                 answer: "done".to_string(),
                 was_freeform: false,
-            })
+            }))
         }
     }
 

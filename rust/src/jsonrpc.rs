@@ -84,6 +84,11 @@ pub mod error_codes {
     /// Internal server error (-32603).
     #[allow(dead_code, reason = "standard JSON-RPC code, reserved for future use")]
     pub const INTERNAL_ERROR: i32 = -32603;
+    /// Fixed admission-rejection class for `userInput.request` handlers that
+    /// decline to admit the request (-32000, the reserved server-error base).
+    /// The error carries only this code and a fixed message — never request
+    /// content — so it is bounded on the wire by construction.
+    pub const USER_INPUT_ADMISSION_REJECTED: i32 = -32000;
 }
 
 /// A JSON-RPC 2.0 notification (no `id`, no response expected).

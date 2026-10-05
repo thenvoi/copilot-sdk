@@ -2258,7 +2258,7 @@ async fn handle_request(
                                         .handle(sid.clone(), question, choices, allow_freeform)
                                         .await
                                 } else {
-                                    None
+                                    Ok(None)
                                 };
                             tracing::debug!(
                                 elapsed_ms = handler_start.elapsed().as_millis(),
@@ -2268,23 +2268,39 @@ async fn handle_request(
                             response
                         }
                     });
-                    let response = handler_task.await.unwrap_or(None);
+                    // A panicking handler degrades to `Ok(None)` — exactly an
+                    // absent handler — and every branch settles the RPC once.
+                    let response = handler_task.await.unwrap_or(Ok(None));
 
-                    let rpc_result = match response {
-                        Some(UserInputResponse {
+                    let rpc_response = match response {
+                        Ok(Some(UserInputResponse {
                             answer,
                             was_freeform,
-                        }) => serde_json::json!({
-                            "answer": answer,
-                            "wasFreeform": was_freeform,
-                        }),
-                        None => serde_json::json!({ "noResponse": true }),
-                    };
-                    let rpc_response = JsonRpcResponse {
-                        jsonrpc: "2.0".to_string(),
-                        id: request_id,
-                        result: Some(rpc_result),
-                        error: None,
+                        })) => JsonRpcResponse {
+                            jsonrpc: "2.0".to_string(),
+                            id: request_id,
+                            result: Some(serde_json::json!({
+                                "answer": answer,
+                                "wasFreeform": was_freeform,
+                            })),
+                            error: None,
+                        },
+                        Ok(None) => JsonRpcResponse {
+                            jsonrpc: "2.0".to_string(),
+                            id: request_id,
+                            result: Some(serde_json::json!({ "noResponse": true })),
+                            error: None,
+                        },
+                        Err(crate::handler::UserInputError::AdmissionRejected) => JsonRpcResponse {
+                            jsonrpc: "2.0".to_string(),
+                            id: request_id,
+                            result: None,
+                            error: Some(crate::JsonRpcError {
+                                code: error_codes::USER_INPUT_ADMISSION_REJECTED,
+                                message: "user input admission rejected".to_string(),
+                                data: None,
+                            }),
+                        },
                     };
                     let _ = client.send_response(&rpc_response).await;
                 }
