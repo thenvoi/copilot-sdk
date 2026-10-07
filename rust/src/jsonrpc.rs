@@ -413,17 +413,27 @@ impl JsonRpcClient {
     ) -> Self {
         let (write_tx, write_rx) = mpsc::unbounded_channel::<WriteCommand>();
 
+        let connection_closed = CancellationToken::new();
+        let pending_requests = Arc::new(RwLock::new(HashMap::new()));
         let writer_span = tracing::error_span!("jsonrpc_write_loop");
-        let write_task = tokio::spawn(Self::write_loop(writer, write_rx).instrument(writer_span));
+        let write_task = tokio::spawn(
+            Self::write_loop(
+                writer,
+                write_rx,
+                connection_closed.clone(),
+                pending_requests.clone(),
+            )
+            .instrument(writer_span),
+        );
 
         let client = Self {
             request_id: AtomicU64::new(1),
             write_tx,
-            pending_requests: Arc::new(RwLock::new(HashMap::new())),
+            pending_requests,
             notification_tx,
             request_tx,
             request_handlers: Arc::new(RwLock::new(HashMap::new())),
-            connection_closed: CancellationToken::new(),
+            connection_closed,
             cancellable_requests: Arc::new(CancellableRequests::default()),
             read_task: Mutex::new(None),
             write_task: Mutex::new(Some(write_task)),
@@ -477,6 +487,17 @@ impl JsonRpcClient {
         }
     }
 
+    /// Whether the transport has observed EOF, a read or write failure, or
+    /// an explicit close.
+    pub(crate) fn is_disconnected(&self) -> bool {
+        self.connection_closed.is_cancelled()
+    }
+
+    /// Resolve once the transport closes; returns immediately if it already has.
+    pub(crate) async fn wait_for_disconnect(&self) {
+        self.connection_closed.cancelled().await;
+    }
+
     pub(crate) fn connection_closed_token(&self) -> CancellationToken {
         self.connection_closed.child_token()
     }
@@ -518,19 +539,36 @@ impl JsonRpcClient {
     async fn write_loop(
         mut writer: impl AsyncWrite + Unpin + Send + 'static,
         mut rx: mpsc::UnboundedReceiver<WriteCommand>,
+        connection_closed: CancellationToken,
+        pending_requests: Arc<RwLock<HashMap<u64, PendingRequest>>>,
     ) {
         while let Some(WriteCommand { frame, ack }) = rx.recv().await {
+            // No response can arrive after closure; dropping the ack fails the
+            // caller instead of leaving its request pending forever.
+            if connection_closed.is_cancelled() {
+                break;
+            }
             let result = async {
                 writer.write_all(&frame).await?;
                 writer.flush().await?;
                 Ok::<_, std::io::Error>(())
             }
             .await;
+            // A failed write means the peer can no longer receive requests:
+            // close the connection so pending and future requests fail fast.
+            let failed = result.is_err();
+            if failed {
+                connection_closed.cancel();
+                pending_requests.write().clear();
+            }
 
             // Caller may have dropped the ack receiver (e.g. their
             // `await` was cancelled); that's fine — we still completed
             // the write, which was the whole point.
             let _ = ack.send(result);
+            if failed {
+                break;
+            }
         }
     }
 

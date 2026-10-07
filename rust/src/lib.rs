@@ -3049,7 +3049,26 @@ impl Client {
         self.inner.child.lock().as_ref().and_then(|c| c.id())
     }
 
+    /// Returns whether the JSON-RPC transport has closed or failed.
+    ///
+    /// This does not report individual session disconnection or reap the child.
+    pub fn is_disconnected(&self) -> bool {
+        self.inner.rpc.is_disconnected()
+    }
+
+    /// Wait for JSON-RPC EOF, read/write failure, or explicit transport closure.
+    ///
+    /// Returns immediately if closure was already observed. This wait is
+    /// cancel-safe and does not stop sessions or the owned child process.
+    /// Call [`stop`](Self::stop) to release router state and reap the child.
+    pub async fn wait_for_disconnect(&self) {
+        self.inner.rpc.wait_for_disconnect().await;
+    }
+
     /// Cooperatively shut down the client and the CLI child process.
+    ///
+    /// If the transport is already disconnected, skips remote cleanup RPCs
+    /// and still clears local sessions and reaps the owned child.
     ///
     /// Walks every still-registered session and sends `session.detach`
     /// for each one and asks SDK-owned runtimes to shut down. For an owned stdio
@@ -3090,8 +3109,12 @@ impl Client {
         // Snapshot the registered session IDs without holding the router
         // lock across the detach RPCs.
         for session_id in self.inner.router.session_ids() {
+            if self.is_disconnected() {
+                break;
+            }
             match self.detach_session(&session_id).await {
                 Ok(_) => {}
+                Err(e) if self.is_disconnected() && e.is_transport_failure() => {}
                 Err(e) => {
                     warn!(
                         session_id = %session_id,
@@ -3103,13 +3126,15 @@ impl Client {
             }
             self.inner.router.unregister(&session_id);
         }
+        // Sessions skipped after transport loss still need their channels closed.
+        self.inner.router.clear();
         self.inner.github_token_registry.clear();
 
         let should_shutdown_runtime = self.inner.child.lock().is_some();
         #[cfg(feature = "in-process")]
         let should_shutdown_runtime =
             should_shutdown_runtime || self.inner.ffi_host.lock().is_some();
-        if should_shutdown_runtime {
+        if should_shutdown_runtime && !self.is_disconnected() {
             let runtime_shutdown_start = Instant::now();
             match tokio::time::timeout(RUNTIME_SHUTDOWN_TIMEOUT, self.rpc().runtime().shutdown())
                 .await
@@ -3120,6 +3145,7 @@ impl Client {
                         "Client::stop runtime shutdown complete"
                     );
                 }
+                Ok(Err(e)) if self.is_disconnected() && e.is_transport_failure() => {}
                 Ok(Err(e)) => {
                     warn!(
                         elapsed_ms = runtime_shutdown_start.elapsed().as_millis(),
