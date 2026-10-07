@@ -811,3 +811,195 @@ async fn wait_for_pending_session_registration(client: &Client) {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 }
+
+/// Fails a transport test instead of hanging when an expected closure never arrives.
+async fn bounded<T>(future: impl Future<Output = T>) -> T {
+    tokio::time::timeout(Duration::from_secs(5), future)
+        .await
+        .expect("transport closure was not observed")
+}
+
+#[tokio::test]
+async fn transport_disconnect_eof_notifies_current_and_late_waiters() {
+    let (client_read, server_write) = tokio::io::duplex(8192);
+    let (client_write, _server_read) = tokio::io::duplex(8192);
+    let client = Client::from_streams(client_read, client_write, PathBuf::from(".")).unwrap();
+    assert!(!client.is_disconnected());
+    let waiter = client.wait_for_disconnect();
+    tokio::pin!(waiter);
+    assert!(futures_util::poll!(&mut waiter).is_pending());
+    drop(server_write);
+    bounded(waiter).await;
+    assert!(client.is_disconnected());
+    bounded(client.wait_for_disconnect()).await;
+    client.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn transport_disconnect_write_failure_notifies_without_read_eof() {
+    let (client_read, _server_write) = tokio::io::duplex(8192);
+    let (client_write, server_read) = tokio::io::duplex(8192);
+    let client = Client::from_streams(client_read, client_write, PathBuf::from(".")).unwrap();
+    drop(server_read);
+    assert!(client.call("ping", None).await.is_err());
+    bounded(client.wait_for_disconnect()).await;
+    assert!(client.is_disconnected());
+    assert!(client.call("ping", None).await.is_err());
+    client.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn transport_disconnect_write_failure_cancels_pending_requests() {
+    let (client_read, _server_write) = tokio::io::duplex(8192);
+    let (client_write, mut server_read) = tokio::io::duplex(8192);
+    let client = Client::from_streams(client_read, client_write, PathBuf::from(".")).unwrap();
+    let first = client.call("first", None);
+    let peer = {
+        let client = client.clone();
+        async move {
+            let mut byte = [0u8; 1];
+            tokio::io::AsyncReadExt::read_exact(&mut server_read, &mut byte)
+                .await
+                .unwrap();
+            drop(server_read);
+            assert!(client.call("second", None).await.is_err());
+        }
+    };
+    let (first, ()) = bounded(async { tokio::join!(first, peer) }).await;
+    assert!(first.is_err());
+    client.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn transport_disconnect_read_failure_cancels_pending_request() {
+    let (client_read, mut server_write) = tokio::io::duplex(8192);
+    let (client_write, mut server_read) = tokio::io::duplex(8192);
+    let client = Client::from_streams(client_read, client_write, PathBuf::from(".")).unwrap();
+    let pending = client.call("ping", None);
+    let peer = async {
+        let mut byte = [0u8; 1];
+        tokio::io::AsyncReadExt::read_exact(&mut server_read, &mut byte)
+            .await
+            .unwrap();
+        tokio::io::AsyncWriteExt::write_all(&mut server_write, b"Content-Length: 99\r\n\r\n{")
+            .await
+            .unwrap();
+        drop(server_write);
+    };
+    let (result, ()) = tokio::join!(pending, peer);
+    assert!(result.is_err());
+    bounded(client.wait_for_disconnect()).await;
+    assert!(client.is_disconnected());
+    client.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn transport_disconnect_rejects_requests_after_closure() {
+    let (client_read, server_write) = tokio::io::duplex(8192);
+    let (client_write, _server_read) = tokio::io::duplex(8192);
+    let client = Client::from_streams(client_read, client_write, PathBuf::from(".")).unwrap();
+    drop(server_write);
+    bounded(client.wait_for_disconnect()).await;
+    let error = bounded(client.call("ping", None))
+        .await
+        .expect_err("a request after transport closure must fail");
+    assert!(error.is_transport_failure());
+    client.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn transport_disconnect_is_not_session_unregistration() {
+    let (client_read, _server_write) = tokio::io::duplex(8192);
+    let (client_write, _server_read) = tokio::io::duplex(8192);
+    let client = Client::from_streams(client_read, client_write, PathBuf::from(".")).unwrap();
+    let first = SessionId::new("first");
+    let second = SessionId::new("second");
+    let first_registration = client.inner.router.register(&first);
+    let _second_registration = client.inner.router.register(&second);
+    client.unregister_session_owned(&first, first_registration.token);
+    assert!(!client.is_disconnected());
+    assert_eq!(client.inner.router.session_ids(), vec![second]);
+    client.force_stop();
+}
+
+#[tokio::test]
+async fn transport_disconnect_during_stop_still_releases_sessions() {
+    let (client_read, server_write) = tokio::io::duplex(8192);
+    let (client_write, mut server_read) = tokio::io::duplex(8192);
+    let client = Client::from_streams(client_read, client_write, PathBuf::from(".")).unwrap();
+    let mut registration = client.inner.router.register(&SessionId::new("closing"));
+    let peer = async {
+        let mut byte = [0u8; 1];
+        tokio::io::AsyncReadExt::read_exact(&mut server_read, &mut byte)
+            .await
+            .unwrap();
+        drop(server_write);
+    };
+    let (result, ()) = tokio::join!(client.stop(), peer);
+    result.expect("EOF while detaching a session still permits local cleanup");
+    assert!(client.is_disconnected());
+    assert!(
+        bounded(registration.channels.notifications.recv())
+            .await
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn transport_disconnect_force_stop_notifies_late_waiter() {
+    let (client_read, _server_write) = tokio::io::duplex(8192);
+    let (client_write, _server_read) = tokio::io::duplex(8192);
+    let client = Client::from_streams(client_read, client_write, PathBuf::from(".")).unwrap();
+    client.force_stop();
+    bounded(client.wait_for_disconnect()).await;
+    assert!(client.is_disconnected());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn transport_disconnect_stop_reaps_exited_child() {
+    let mut child = tokio::process::Command::new("/bin/sh")
+        .args(["-c", "read line; exit 0"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let pid = child.id().unwrap();
+    let reader = child.stdout.take().unwrap();
+    let mut writer = child.stdin.take().unwrap();
+    tokio::io::AsyncWriteExt::write_all(&mut writer, b"exit\n")
+        .await
+        .unwrap();
+    let client = Client::from_streams(reader, writer, PathBuf::from(".")).unwrap();
+    *client.inner.child.lock() = Some(child);
+    let mut registration = client
+        .inner
+        .router
+        .register(&SessionId::new("exited-child"));
+    bounded(client.wait_for_disconnect()).await;
+    assert!(matches!(
+        registration.channels.notifications.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    client.stop().await.unwrap();
+    assert!(
+        bounded(registration.channels.notifications.recv())
+            .await
+            .is_none()
+    );
+    assert!(
+        bounded(registration.channels.requests.recv())
+            .await
+            .is_none()
+    );
+    assert!(client.inner.router.session_ids().is_empty());
+    assert!(client.pid().is_none());
+    #[cfg(target_os = "linux")]
+    assert!(
+        !Path::new(&format!("/proc/{pid}")).exists(),
+        "child was not reaped"
+    );
+    #[cfg(not(target_os = "linux"))]
+    let _ = pid;
+}

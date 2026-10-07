@@ -480,6 +480,17 @@ impl JsonRpcClient {
         }
     }
 
+    /// Whether the transport has observed EOF, a read or write failure, or
+    /// an explicit close.
+    pub(crate) fn is_disconnected(&self) -> bool {
+        self.connection_closed.is_cancelled()
+    }
+
+    /// Resolve once the transport closes; returns immediately if it already has.
+    pub(crate) async fn wait_for_disconnect(&self) {
+        self.connection_closed.cancelled().await;
+    }
+
     pub(crate) fn connection_closed_token(&self) -> CancellationToken {
         self.connection_closed.child_token()
     }
@@ -524,12 +535,25 @@ impl JsonRpcClient {
         connection_closed: CancellationToken,
     ) {
         while let Some(WriteCommand { frame, ack }) = rx.recv().await {
+            // No response can arrive after closure; dropping the ack fails the
+            // caller instead of leaving its request pending forever.
+            if connection_closed.is_cancelled() {
+                break;
+            }
             let result = async {
                 writer.write_all(&frame).await?;
                 writer.flush().await?;
                 Ok::<_, std::io::Error>(())
             }
             .await;
+            // A failed write means the peer can no longer receive requests:
+            // close the connection so pending and future requests fail fast.
+            // The read loop observes cancellation and drains pending requests.
+            let failed = result.is_err();
+            if failed {
+                connection_closed.cancel();
+            }
+
             // Caller may have dropped the ack receiver (e.g. their
             // `await` was cancelled); that's fine — we still completed
             // the write, which was the whole point.
@@ -540,10 +564,11 @@ impl JsonRpcClient {
                 None => {
                     if let Err(error) = result {
                         error!(%error, "router rejection write failed; closing connection");
-                        connection_closed.cancel();
-                        break;
                     }
                 }
+            }
+            if failed {
+                break;
             }
         }
     }
