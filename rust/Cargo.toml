@@ -98,7 +98,6 @@ windows-sys = { version = "0.61", default-features = false, features = [
 
 [dev-dependencies]
 flate2 = "1"
-native-tls = "0.2"
 ahp = { git = "https://github.com/microsoft/agent-host-protocol", tag = "rust/v0.9.0" }
 ahp-types = { git = "https://github.com/microsoft/agent-host-protocol", tag = "rust/v0.9.0" }
 ahp-ws = { git = "https://github.com/microsoft/agent-host-protocol", tag = "rust/v0.9.0", default-features = false }
@@ -109,7 +108,7 @@ sha2 = "0.10"
 tar = "0.4"
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread"] }
-ureq = { version = "3", default-features = false, features = ["native-tls"] }
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
 zip = { version = "7.2.0", default-features = false, features = ["deflate"] }
 
 # Integration tests that call test-support-only Client methods (e.g.
@@ -171,10 +170,9 @@ required-features = ["test-support"]
 [build-dependencies]
 dirs = "5"
 flate2 = "1"
-native-tls = "0.2"
 serde_json = "1"
 # 0.11 adds a second digest/block-buffer stack beside the SDK's transitive 0.10.
 sha2 = "0.10"
 tar = "0.4"
-ureq = { version = "3", default-features = false, features = ["native-tls"] }
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
 zip = { version = "7.2.0", default-features = false, features = ["deflate"] }
