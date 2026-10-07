@@ -14,9 +14,8 @@ pub(super) fn is_transient(error: &ureq::Error) -> bool {
         | ureq::Error::RequireHttpsOnly(_)
         | ureq::Error::TlsRequired
         | ureq::Error::Tls(_)
-        | ureq::Error::NativeTls(_)
+        | ureq::Error::Rustls(_)
         | ureq::Error::Pem(_)
-        | ureq::Error::Der(_)
         | ureq::Error::BodyExceedsLimit(_)
         | ureq::Error::LargeResponseHeader(..) => false,
         _ => true,

@@ -589,14 +589,10 @@ struct DownloadError {
 }
 
 fn try_download(url: &str) -> Result<Vec<u8>, DownloadError> {
-    native_tls::TlsConnector::new().map_err(|e| DownloadError {
-        message: format!("native-tls init error: {e}"),
-        transient: false,
-    })?;
     let agent = ureq::Agent::config_builder()
         .tls_config(
             ureq::tls::TlsConfig::builder()
-                .provider(ureq::tls::TlsProvider::NativeTls)
+                .provider(ureq::tls::TlsProvider::Rustls)
                 .root_certs(ureq::tls::RootCerts::PlatformVerifier)
                 .build(),
         )
