@@ -1,0 +1,105 @@
+# Keeps thenvoi/tjam's Copilot SDK patch set current with upstream.
+# See FORK-CHANGES.md for the patch contract and upgrade procedure.
+name: jam-rebase-rustls-transport
+
+on:
+  schedule:
+    - cron: "13 7 * * 1" # weekly, Monday 07:13 UTC; tjam watches at 07:30
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  rebase:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/github/copilot-sdk.git
+          git fetch upstream main --quiet
+
+      - name: Plan replay
+        id: plan
+        run: |
+          set -euo pipefail
+          target=$(git rev-parse upstream/main)
+          branch=jam-rustls-transport-latest
+          patches=$(git rev-list --reverse HEAD --not --remotes=upstream)
+          [ -n "$patches" ] || {
+            echo "no fork-only commits found on $(git branch --show-current)" >&2
+            exit 1
+          }
+          git fetch origin "$branch" --quiet || true
+          {
+            echo "target=$target"
+            echo "branch=$branch"
+            echo "patches<<EOF"
+            echo "$patches"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Replay patch onto upstream main
+        id: replay
+        env:
+          PATCHES: ${{ steps.plan.outputs.patches }}
+        run: |
+          set -euo pipefail
+          git config user.name "jam-fork-bot"
+          git config user.email "dev@thenvoi.com"
+          git checkout -B "${{ steps.plan.outputs.branch }}" "${{ steps.plan.outputs.target }}"
+          while IFS= read -r sha; do
+            [ -z "$sha" ] && continue
+            if ! git cherry-pick "$sha"; then
+              echo "::error::$sha no longer applies to upstream main at ${{ steps.plan.outputs.target }}; resolve the fork rebase by hand"
+              exit 1
+            fi
+          done <<< "$PATCHES"
+          changed=true
+          if git show-ref --verify --quiet "refs/remotes/origin/${{ steps.plan.outputs.branch }}" &&
+             git diff --quiet "origin/${{ steps.plan.outputs.branch }}" HEAD; then
+            changed=false
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+
+      - name: Validate patched SDK
+        if: steps.replay.outputs.changed == 'true'
+        working-directory: rust
+        run: |
+          set -euo pipefail
+          cargo fmt --all --check
+          cargo check --all-targets --features test-support
+          cargo test --lib --features test-support
+          # The patch exists to keep native-tls/OpenSSL out of consumers'
+          # runtime and build graphs (Jam builds with default features off).
+          graph=$(cargo tree -e normal,build --no-default-features --features rustls \
+            --prefix none --format '{p}')
+          if grep -E '^(native-tls|openssl-sys) ' <<< "$graph"; then
+            echo "::error::native-tls/OpenSSL is back in the consumer dependency graph"
+            exit 1
+          fi
+
+      - name: Push pre-staged revision
+        if: steps.replay.outputs.changed == 'true'
+        run: |
+          git push --force-with-lease origin "HEAD:${{ steps.plan.outputs.branch }}"
+          {
+            echo "## jam-rebase-rustls-transport"
+            echo "Pre-staged \`${{ steps.plan.outputs.branch }}\` at $(git rev-parse HEAD)"
+            echo "over upstream ${{ steps.plan.outputs.target }}."
+            echo ""
+            echo "thenvoi/tjam's fork-freshness workflow will file an issue if"
+            echo "its pinned revision differs from this branch head."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report current revision
+        if: steps.replay.outputs.changed == 'false'
+        run: |
+          {
+            echo "## jam-rebase-rustls-transport"
+            echo "The generated branch already has the expected upstream tree and fork patch set."
+          } >> "$GITHUB_STEP_SUMMARY"
