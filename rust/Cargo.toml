@@ -41,6 +41,9 @@ runtime = []
 # `reqwest/native-tls` flips `reqwest`'s default TLS backend to native-tls for
 # every reqwest client in the consumer's whole dependency graph.
 rustls = ["reqwest/rustls", "tokio-tungstenite/rustls-tls-native-roots"]
+# Keep the application's crypto provider instead of enabling reqwest's AWS-LC
+# default. The consumer must enable and install its rustls CryptoProvider.
+rustls-no-provider = ["reqwest/rustls-no-provider", "tokio-tungstenite/rustls-tls-native-roots"]
 native-tls = ["reqwest/native-tls", "tokio-tungstenite/native-tls"]
 bundled-cli = ["runtime", "dep:tar", "dep:flate2", "dep:zip"]
 in-process = ["runtime", "dep:libloading"]

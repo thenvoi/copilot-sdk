@@ -17,8 +17,12 @@ TLS features switch every `reqwest` client in the consumer binary to OpenSSL.
 
 - Backport of [github/copilot-sdk#2811](https://github.com/github/copilot-sdk/pull/2811):
   the request-handler transport gets a default `rustls` feature and an opt-in
-  `native-tls` feature instead of a hard-coded backend. Jam builds with
-  `default-features = false`, so it must enable `rustls` explicitly.
+  `native-tls` feature instead of a hard-coded backend. The additive
+  `rustls-no-provider` feature enables rustls without reqwest's AWS-LC provider.
+  Consumers must enable and install their own rustls crypto provider. Jam uses
+  `default-features = false, features = ["runtime", "rustls-no-provider"]` and
+  installs ring through its shared TLS owner. The default `rustls` feature keeps
+  its existing AWS-LC selection.
 - The build-time CLI download uses ureq's rustls provider with the platform
   verifier. Upstream #1964 moved it to `native-tls`; build dependencies are part
   of every consumer's resolved graph, so that change reintroduced `native-tls`
@@ -26,6 +30,8 @@ TLS features switch every `reqwest` client in the consumer binary to OpenSSL.
 
 The weekly validation fails if `native-tls` or `openssl-sys` reappears in the
 `--no-default-features --features rustls` normal or build dependency graph.
+It also rejects AWS-LC, native-tls, and OpenSSL in the
+`--no-default-features --features runtime,rustls-no-provider` consumer graph.
 
 ## 2. Transport-closure observation and cleanup
 
@@ -97,7 +103,8 @@ issue until `Cargo.toml` and `Cargo.lock` pin the new revision.
 1. Inspect the latest successful `jam-rebase-rustls-transport` run and its
    staged SHA.
 2. Point tjam's `github-copilot-sdk` git `rev` at that SHA, keeping
-   `default-features = false` and enabling the `rustls` feature.
+   `default-features = false` and enabling `runtime` and `rustls-no-provider`.
+   Keep Jam's shared ring provider installed before constructing SDK clients.
 3. Run `cargo update -p github-copilot-sdk`, the Copilot host tests, and the
    full tjam verification gate (`cargo deny` included).
 4. Recheck teardown after native-child loss. Upstream `Client::stop()` now
