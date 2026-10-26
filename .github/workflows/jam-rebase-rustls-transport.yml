@@ -82,6 +82,12 @@ jobs:
             echo "::error::native-tls/OpenSSL is back in the consumer dependency graph"
             exit 1
           fi
+          graph=$(cargo tree -e normal,build --no-default-features \
+            --features runtime,rustls-no-provider --prefix none --format '{p}')
+          if grep -E '^(aws-lc-rs|aws-lc-sys|native-tls|openssl-sys) ' <<< "$graph"; then
+            echo "::error::the provider-neutral consumer graph selects a forbidden TLS backend"
+            exit 1
+          fi
 
       - name: Push pre-staged revision
         if: steps.replay.outputs.changed == 'true'
