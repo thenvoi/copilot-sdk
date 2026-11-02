@@ -55,6 +55,13 @@ second closure signal. Originally reviewed as
 [thenvoi/copilot-sdk#1](https://github.com/thenvoi/copilot-sdk/pull/1) on the
 v1.0.6-preview.1 base.
 
+## 3. Patched ZIP extraction
+
+The Rust crate uses `zip` 9 for build-time archive inspection and optional
+Windows CLI extraction. Archive names use its fallible decoding API.
+Remove this patch after rebasing onto an upstream revision that uses `zip` 9
+or later.
+
 ## Dropped since the v1.0.6-preview.1 fork
 
 - Spawned `userInput.request` dispatch: upstream now dispatches every inbound
@@ -113,4 +120,4 @@ issue until `Cargo.toml` and `Cargo.lock` pin the new revision.
    can therefore surface as a tjam teardown timeout. The fork does not change
    that wait.
 5. Update tjam's fork comment and changelog if upstream behavior changed.
-6. Remove the fork pin once a released upstream crate contains both patches.
+6. Remove the fork pin once a released upstream crate contains all required patches.
