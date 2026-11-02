@@ -1095,7 +1095,8 @@ fn archive_zip_entry_size(zip_bytes: &[u8], binary_name: &str) -> Option<u64> {
     };
     (0..archive.len()).find_map(|index| {
         archive.by_index(index).ok().and_then(|entry| {
-            (entry.name() == binary_name || entry.name().ends_with(&format!("/{binary_name}")))
+            let name = entry.name().ok()?;
+            (name == binary_name || name.ends_with(&format!("/{binary_name}")))
                 .then(|| entry.size())
         })
     })
