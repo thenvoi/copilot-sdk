@@ -30,13 +30,17 @@ include = [
 name = "github_copilot_sdk"
 
 [features]
-default = ["bundled-cli"]
-runtime = ["dep:openssl", "dep:rustls", "dep:ureq"]
+default = ["bundled-cli", "rustls"]
+runtime = ["dep:rustls", "dep:ureq"]
 bundled-cli = ["runtime", "network-forwarding", "dep:tar", "dep:flate2", "dep:zip"]
 in-process = ["runtime", "dep:libloading"]
 local-runtime = ["in-process"]
 bundled-in-process = ["bundled-cli", "in-process"]
-network-forwarding = ["dep:native-tls", "dep:openssl-sys", "dep:reqwest", "dep:tokio-tungstenite", "dep:tokio-rustls", "dep:rustls-platform-verifier"]
+network-forwarding = ["dep:reqwest", "dep:tokio-tungstenite"]
+rustls = ["rustls-no-provider", "tokio-rustls/aws_lc_rs"]
+# Embedders install their own process-wide rustls crypto provider.
+rustls-no-provider = ["network-forwarding", "dep:tokio-rustls", "dep:rustls-platform-verifier", "reqwest/rustls-no-provider", "tokio-tungstenite/rustls-tls-native-roots"]
+native-tls = ["network-forwarding", "dep:native-tls", "dep:openssl-sys", "reqwest/native-tls", "tokio-tungstenite/native-tls"]
 derive = ["dep:schemars"]
 test-support = []
 
@@ -80,23 +84,13 @@ http = "1"
 futures-util = "0.3"
 reqwest = { version = "0.13", default-features = false, features = ["stream", "http2"], optional = true }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect"], optional = true }
-
-[target.'cfg(not(target_os = "macos"))'.dependencies]
 native-tls = { version = "0.2", optional = true }
-reqwest = { version = "0.13", default-features = false, features = ["native-tls"], optional = true }
-tokio-tungstenite = { version = "0.30", default-features = false, features = ["native-tls"], optional = true }
+rustls-platform-verifier = { version = "0.7", optional = true }
+# A distinct runtime dependency avoids unifying the acquisition provider.
+tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 openssl-sys = { version = "0.9", optional = true }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"], optional = true }
-rustls-platform-verifier = { version = "0.7", optional = true }
-# Forwarding names Rustls through this re-export: `dep:rustls` would also
-# activate acquisition's same-named build dependency, and `runtime`'s would
-# compile this target AWS-LC stack. Cargo rejects renaming one of them.
-tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"], optional = true }
-tokio-tungstenite = { version = "0.30", default-features = false, features = ["rustls-tls-native-roots"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
 # Archive acquisition only needs flate2; don't compile the Zopfli compressor
@@ -117,16 +111,15 @@ windows-sys = { version = "0.61", default-features = false, features = [
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { version = "0.61", default-features = false, features = ["Win32_Security", "Win32_Security_Cryptography"] }
 
-[target.'cfg(target_os = "linux")'.dev-dependencies]
-openssl = "0.10"
+[dev-dependencies.rustls]
+version = "0.23"
+default-features = false
+features = ["ring", "std", "tls12"]
 
-[target.'cfg(not(target_os = "macos"))'.dev-dependencies]
-native-tls = "0.2"
-ureq = { version = "3", default-features = false, features = ["native-tls"] }
-
-[target.'cfg(target_os = "macos")'.dev-dependencies]
-rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
-ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "platform-verifier"] }
+[dev-dependencies.ureq]
+version = "3"
+default-features = false
+features = ["rustls-no-provider", "platform-verifier"]
 
 [dev-dependencies]
 # Offline consumer-graph fixtures exercise local-runtime even when the outer
@@ -222,9 +215,8 @@ flate2 = "1"
 serde_json = "1"
 tar = "0.4"
 zip = { version = "9.1", default-features = false, features = ["deflate-flate2"] }
-
-[target.'cfg(not(target_os = "macos"))'.build-dependencies]
-ureq = { version = "3", default-features = false, features = ["native-tls"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "platform-verifier"], optional = true }
 
 [target.'cfg(windows)'.build-dependencies]
 windows-sys = { version = "0.61", default-features = false, features = [
@@ -232,13 +224,3 @@ windows-sys = { version = "0.61", default-features = false, features = [
     "Win32_System_Com",
     "Win32_UI_Shell",
 ] }
-
-[target.'cfg(target_os = "linux")'.build-dependencies]
-openssl = { version = "0.10", optional = true }
-
-[target.'cfg(target_os = "macos")'.build-dependencies]
-rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"], optional = true }
-ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "platform-verifier"], optional = true }
-
-[target.'cfg(not(any(windows, target_os = "macos", target_os = "linux")))'.build-dependencies]
-sha2 = "0.11"

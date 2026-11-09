@@ -34,7 +34,7 @@ pub use errors::*;
 /// model-layer HTTP and WebSocket traffic the runtime issues for both CAPI and
 /// BYOK sessions.
 pub mod copilot_request_handler;
-#[cfg(all(target_os = "macos", feature = "network-forwarding"))]
+#[cfg(feature = "rustls-no-provider")]
 mod network_tls;
 
 pub mod entra;
@@ -3762,6 +3762,22 @@ impl Client {
         self.inner.child.lock().as_ref().and_then(|c| c.id())
     }
 
+    /// Returns whether the JSON-RPC transport has closed or failed.
+    ///
+    /// This does not report individual session disconnection or reap the child.
+    pub fn is_disconnected(&self) -> bool {
+        self.inner.rpc.is_disconnected()
+    }
+
+    /// Wait for JSON-RPC EOF, read/write failure, or explicit transport closure.
+    ///
+    /// Returns immediately if closure was already observed. This wait is
+    /// cancel-safe and does not stop sessions or the owned child process.
+    /// Call [`stop`](Self::stop) to release router state and reap the child.
+    pub async fn wait_for_disconnect(&self) {
+        self.inner.rpc.wait_for_disconnect().await;
+    }
+
     /// Cooperatively shut down the client and the CLI child process.
     ///
     /// Walks every still-registered session and sends `session.detach`
@@ -3775,6 +3791,9 @@ impl Client {
     /// termination are collected into [`StopErrors`] rather than
     /// short-circuiting on the first failure — so callers see the full picture
     /// of teardown.
+    ///
+    /// If the transport is already disconnected, skips remote cleanup RPCs
+    /// and still clears local sessions and reaps the owned child.
     ///
     /// If you have already called [`Session::disconnect`] on every
     /// session this client created, the per-session destroy step is a
@@ -3808,6 +3827,9 @@ impl Client {
         // moves on to runtime shutdown and termination.
         let detach_deadline = tokio::time::Instant::now() + RUNTIME_SHUTDOWN_TIMEOUT;
         for session_id in self.inner.router.session_ids() {
+            if self.is_disconnected() {
+                break;
+            }
             let detached =
                 tokio::time::timeout_at(detach_deadline, self.detach_session(&session_id))
                     .await
@@ -3820,6 +3842,7 @@ impl Client {
                     });
             match detached {
                 Ok(_) => {}
+                Err(e) if self.is_disconnected() && e.is_transport_failure() => {}
                 Err(e) => {
                     warn!(
                         session_id = %session_id,
@@ -3831,6 +3854,8 @@ impl Client {
             }
             self.inner.router.unregister(&session_id);
         }
+        // Sessions skipped after transport loss still need their channels closed.
+        self.inner.router.clear();
         self.inner.github_token_registry.clear();
 
         let should_shutdown_runtime = self.inner.child.lock().is_some();
@@ -3842,7 +3867,7 @@ impl Client {
                 .lock()
                 .as_ref()
                 .is_some_and(|host| host.owns_host());
-        if should_shutdown_runtime {
+        if should_shutdown_runtime && !self.is_disconnected() {
             let runtime_shutdown_start = Instant::now();
             match tokio::time::timeout(RUNTIME_SHUTDOWN_TIMEOUT, self.rpc().runtime().shutdown())
                 .await
@@ -3853,6 +3878,7 @@ impl Client {
                         "Client::stop runtime shutdown complete"
                     );
                 }
+                Ok(Err(e)) if self.is_disconnected() && e.is_transport_failure() => {}
                 Ok(Err(e)) => {
                     warn!(
                         elapsed_ms = runtime_shutdown_start.elapsed().as_millis(),

@@ -16,7 +16,7 @@ fn main() {
     implementation::main();
     #[cfg(not(feature = "runtime"))]
     {
-        openssl_linkage::require_target_provider(false);
+        openssl_linkage::require_target_provider();
         println!("cargo::rustc-check-cfg=cfg(has_bundled_cli)");
         println!("cargo::rustc-check-cfg=cfg(has_extracted_cli)");
         println!("cargo::rustc-check-cfg=cfg(sdk_compiled_protocol)");

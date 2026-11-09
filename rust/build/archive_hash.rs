@@ -7,20 +7,10 @@ pub(super) fn sha256(data: &[u8]) -> [u8; 32] {
         .unwrap_or_else(|error| panic!("Cannot verify Copilot archive SHA256: {error}"))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(not(windows))]
 pub(super) fn sha256(data: &[u8]) -> [u8; 32] {
-    let digest = openssl::hash::hash(openssl::hash::MessageDigest::sha256(), data)
-        .unwrap_or_else(|error| panic!("Cannot verify Copilot archive SHA256: {error}"));
-    digest
-        .as_ref()
-        .try_into()
-        .expect("OpenSSL SHA256 produces a 32-byte digest")
-}
-
-#[cfg(target_os = "macos")]
-pub(super) fn sha256(data: &[u8]) -> [u8; 32] {
-    // Reuse the downloader's existing AWS-LC SHA-256 provider.
-    let digest = rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_128_GCM_SHA256
+    // Reuse the downloader's ring provider; acquisition carries no other crypto.
+    let digest = rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256
         .tls13()
         .expect("AES-128-GCM-SHA256 is a TLS 1.3 cipher suite")
         .common
@@ -29,14 +19,7 @@ pub(super) fn sha256(data: &[u8]) -> [u8; 32] {
     digest
         .as_ref()
         .try_into()
-        .expect("AWS-LC SHA256 produces a 32-byte digest")
-}
-
-#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
-pub(super) fn sha256(data: &[u8]) -> [u8; 32] {
-    use sha2::Digest;
-
-    sha2::Sha256::digest(data).into()
+        .expect("ring SHA256 produces a 32-byte digest")
 }
 
 #[cfg(windows)]

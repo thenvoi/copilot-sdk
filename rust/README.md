@@ -13,10 +13,10 @@ See [github/copilot-sdk](https://github.com/github/copilot-sdk) for the equivale
 To use the SDK, you'll need:
 
 - Rust 1.94.0 or later
-- Linux runtime/forwarding builds require OS OpenSSL 3 development files;
-  stream-only builds do not. Static or vendored OpenSSL is rejected.
-- macOS archive SHA-256 and TLS use AWS-LC, retained as a crypto-review gap.
-  TLS certificate verification uses platform trust; Swift is not required.
+- TLS uses rustls with platform certificate verification by default.
+- `rustls-no-provider` uses the application's installed rustls crypto provider.
+- Build-time downloads and archive hashes use ring independently of the application provider.
+- Optional `native-tls` forwarding requires OS OpenSSL development files on Linux.
 
 ## Quick Start
 
@@ -83,6 +83,17 @@ runtime without embedding its bundle, use
 The `in-process` and `local-runtime` features also enable runtime management;
 `local-runtime` continues to use application-supplied artifacts without downloading
 them. Enabling `bundled-cli` alongside `local-runtime` retains normal bundling.
+
+### TLS features
+
+The default `rustls` feature enables network forwarding with AWS-LC.
+To use an application-owned provider, select
+`default-features = false, features = ["runtime", "rustls-no-provider"]`.
+Enable and install a rustls crypto provider before forwarding requests.
+The SDK reports a configuration error if no provider is installed.
+Build-time downloads use ring and the platform certificate verifier.
+The optional `native-tls` feature selects native TLS when rustls is disabled.
+With `network-forwarding` alone, forwarding supports plaintext HTTP and WebSocket connections.
 
 ## API Reference
 
