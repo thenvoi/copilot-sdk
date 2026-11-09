@@ -13,8 +13,6 @@ permissions:
 jobs:
   rebase:
     runs-on: ubuntu-latest
-    env:
-      BUNDLED_CLI_CACHE_DIR: ${{ runner.temp }}/copilot-cli-assets
     steps:
       - uses: actions/checkout@v4
         with:
@@ -84,6 +82,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          export BUNDLED_CLI_CACHE_DIR="$RUNNER_TEMP/copilot-cli-assets"
+          echo "BUNDLED_CLI_CACHE_DIR=$BUNDLED_CLI_CACHE_DIR" >> "$GITHUB_ENV"
           version=$(node -p 'require("./nodejs/package.json").copilotCliVersion')
           [[ "$version" =~ ^[0-9][a-zA-Z0-9.+-]*$ ]] || {
             echo "::error::invalid pinned Copilot CLI version"
