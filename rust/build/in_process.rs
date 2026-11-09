@@ -13,8 +13,6 @@ mod download;
 #[path = "openssl_linkage.rs"]
 mod openssl_linkage;
 
-#[cfg(any(target_os = "linux", test))]
-use openssl_linkage::require_dynamic_openssl;
 #[cfg(test)]
 use openssl_linkage::require_openssl_3;
 
@@ -22,16 +20,7 @@ use openssl_linkage::require_openssl_3;
 mod cache_paths;
 
 pub(crate) fn main() {
-    #[cfg(target_os = "linux")]
-    {
-        openssl_linkage::require_shared_host_provider();
-        require_dynamic_openssl(
-            "Linux SDK build host",
-            &std::env::var("HOST").expect("Cargo provides HOST"),
-            true,
-        );
-    }
-    openssl_linkage::require_target_provider(cfg!(target_os = "linux"));
+    openssl_linkage::require_target_provider();
 
     println!("cargo:rerun-if-env-changed=DOCS_RS");
     println!("cargo:rerun-if-env-changed=COPILOT_SKIP_CLI_DOWNLOAD");

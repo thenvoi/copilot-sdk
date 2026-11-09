@@ -24,14 +24,16 @@ fn rejects_client_and_configuration_failures() {
     assert!(!download::is_transient(&ureq::Error::TlsRequired));
 }
 
-#[cfg(not(target_os = "macos"))]
 #[test]
-fn native_tls_configuration_failures_remain_terminal() {
-    let error = native_tls::Certificate::from_der(b"invalid certificate")
+fn rustls_certificate_failures_remain_terminal() {
+    let error = rustls::RootCertStore::empty()
+        .add(rustls::pki_types::CertificateDer::from(
+            b"invalid certificate".as_slice(),
+        ))
         .err()
         .expect("invalid DER must be rejected");
     let error: ureq::Error = error.into();
-    assert!(matches!(&error, ureq::Error::NativeTls(_)));
+    assert!(matches!(&error, ureq::Error::Rustls(_)));
     assert!(!download::is_transient(&error));
 }
 
@@ -50,15 +52,17 @@ fn reports_http_reason_and_distinguishes_other_errors() {
 #[test]
 fn builds_platform_tls_agent() {
     let agent = download::agent();
-    #[cfg(target_os = "macos")]
     assert_eq!(
         agent.config().tls_config().provider(),
         ureq::tls::TlsProvider::Rustls
     );
-    #[cfg(not(target_os = "macos"))]
-    assert_eq!(
-        agent.config().tls_config().provider(),
-        ureq::tls::TlsProvider::NativeTls
+    // Acquisition never depends on a process-default provider an embedder installs.
+    assert!(
+        agent
+            .config()
+            .tls_config()
+            .unversioned_rustls_crypto_provider()
+            .is_some()
     );
     assert!(matches!(
         agent.config().tls_config().root_certs(),

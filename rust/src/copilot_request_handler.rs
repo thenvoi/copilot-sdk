@@ -46,10 +46,13 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use tokio_tungstenite::tungstenite::Message;
 #[cfg(feature = "network-forwarding")]
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+#[cfg(all(
+    feature = "network-forwarding",
+    any(feature = "native-tls", feature = "rustls-no-provider")
+))]
+use tokio_tungstenite::{Connector, connect_async_tls_with_config};
 #[cfg(feature = "network-forwarding")]
-use tokio_tungstenite::{
-    Connector, MaybeTlsStream, WebSocketStream, connect_async_tls_with_config,
-};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
@@ -441,13 +444,13 @@ static SHARED_HTTP_CLIENT: LazyLock<
     Result<reqwest::Client, Box<dyn std::error::Error + Send + Sync>>,
 > = LazyLock::new(|| {
     let builder = reqwest::Client::builder();
-    #[cfg(target_os = "macos")]
+    #[cfg(feature = "rustls-no-provider")]
     let builder = {
         let mut tls = crate::network_tls::client_config()?;
         tls.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
         builder.tls_backend_preconfigured(tls)
     };
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(feature = "native-tls", not(feature = "rustls-no-provider")))]
     let builder = builder.tls_backend_native();
     Ok(builder
         .redirect(reqwest::redirect::Policy::none())
@@ -569,8 +572,9 @@ impl CopilotWebSocketForwarderBuilder {
         }
 
         // Explicit selection survives consumers enabling another TLS backend.
+        #[cfg(any(feature = "native-tls", feature = "rustls-no-provider"))]
         let connector = if request.uri().scheme_str() == Some("wss") {
-            #[cfg(target_os = "macos")]
+            #[cfg(feature = "rustls-no-provider")]
             {
                 let config = tokio::task::spawn_blocking(crate::network_tls::client_config)
                     .await
@@ -586,7 +590,7 @@ impl CopilotWebSocketForwarderBuilder {
                     })?;
                 Connector::Rustls(Arc::new(config))
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(all(feature = "native-tls", not(feature = "rustls-no-provider")))]
             {
                 let connector = tokio::task::spawn_blocking(native_tls::TlsConnector::new)
                     .await
@@ -605,8 +609,11 @@ impl CopilotWebSocketForwarderBuilder {
         } else {
             Connector::Plain
         };
-        let (stream, _) = connect_async_tls_with_config(request, None, false, Some(connector))
-            .await
+        #[cfg(any(feature = "native-tls", feature = "rustls-no-provider"))]
+        let connection = connect_async_tls_with_config(request, None, false, Some(connector)).await;
+        #[cfg(not(any(feature = "native-tls", feature = "rustls-no-provider")))]
+        let connection = tokio_tungstenite::connect_async_with_config(request, None, false).await;
+        let (stream, _) = connection
             .map_err(|e| CopilotRequestError::Upstream(format!("websocket connect failed: {e}")))?;
         let (write, mut read) = stream.split();
 

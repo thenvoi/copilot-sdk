@@ -805,6 +805,17 @@ impl JsonRpcClient {
         }
     }
 
+    /// Whether the transport has observed EOF, a read or write failure, or an
+    /// explicit close.
+    pub(crate) fn is_disconnected(&self) -> bool {
+        self.connection_closed.is_cancelled()
+    }
+
+    /// Resolve once the transport closes; returns immediately if it already has.
+    pub(crate) async fn wait_for_disconnect(&self) {
+        self.connection_closed.cancelled().await;
+    }
+
     pub(crate) fn connection_closed_token(&self) -> CancellationToken {
         self.connection_closed.child_token()
     }
@@ -845,6 +856,10 @@ impl JsonRpcClient {
     /// on the wire (or surface an `io::Error` to the ack receiver if the
     /// transport is broken).
     ///
+    /// A failed write means the peer can no longer receive frames, so it
+    /// closes the connection: the read loop then fails every pending request,
+    /// and later submissions fail instead of waiting for a response.
+    ///
     /// Exits cleanly when all senders drop (channel closes), flushing any
     /// final buffered bytes.
     async fn write_loop(
@@ -859,20 +874,22 @@ impl JsonRpcClient {
                 Ok::<_, std::io::Error>(())
             }
             .await;
+            let failed = result.is_err();
+            if let Err(error) = &result {
+                error!(%error, "JSON-RPC write failed; closing connection");
+                // Close before acknowledging so a caller that sees the write
+                // error also observes the closed connection.
+                connection_closed.cancel();
+            }
             // Caller may have dropped the ack receiver (e.g. their
             // `await` was cancelled); that's fine — we still completed
-            // the write, which was the whole point.
-            match ack {
-                Some(ack) => {
-                    let _ = ack.send(result);
-                }
-                None => {
-                    if let Err(error) = result {
-                        error!(%error, "router rejection write failed; closing connection");
-                        connection_closed.cancel();
-                        break;
-                    }
-                }
+            // the write, which was the whole point. Router rejections
+            // carry no ack.
+            if let Some(ack) = ack {
+                let _ = ack.send(result);
+            }
+            if failed {
+                break;
             }
         }
     }
