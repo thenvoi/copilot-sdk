@@ -93,10 +93,16 @@ validates formatting, compilation (including the provider-neutral
 configuration), SDK unit tests, archive acquisition, session shutdown, and TLS
 dependency graphs before updating the generated branch with `--force-with-lease`.
 
-A red run means either the default branch is not linear or upstream drifted
-under the patch set; both require the manual recovery below. When the staged
-branch advances, Band's `fork-freshness` workflow files an issue until
-`Cargo.toml` and `Cargo.lock` pin the new revision.
+Validation generates the upstream version snapshots from the pinned release's
+checksums and caches the real Ubuntu CLI and runtime archives through GitHub's
+release API. Every build configuration reuses those inputs. The SDK verifies
+their hashes before use. The generated snapshots and cache are not committed.
+
+If planning or replay fails, use the manual recovery below. If release
+preparation or validation fails, inspect that failure and keep the generated
+branch unchanged until the required inputs and checks succeed.
+When the staged branch advances, Band's `fork-freshness` workflow files an issue
+until `Cargo.toml` and `Cargo.lock` pin the new revision.
 
 ### Manual recovery
 

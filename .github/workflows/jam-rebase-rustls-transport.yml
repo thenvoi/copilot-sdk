@@ -13,6 +13,8 @@ permissions:
 jobs:
   rebase:
     runs-on: ubuntu-latest
+    env:
+      BUNDLED_CLI_CACHE_DIR: ${{ runner.temp }}/copilot-cli-assets
     steps:
       - uses: actions/checkout@v4
         with:
@@ -75,6 +77,36 @@ jobs:
             changed=false
           fi
           echo "changed=$changed" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare verified CLI release inputs
+        if: steps.replay.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(node -p 'require("./nodejs/package.json").copilotCliVersion')
+          [[ "$version" =~ ^[0-9][a-zA-Z0-9.+-]*$ ]] || {
+            echo "::error::invalid pinned Copilot CLI version"
+            exit 1
+          }
+          release=$(gh api "repos/github/copilot-cli/releases/tags/v$version")
+          asset_id() {
+            jq -er --arg name "$1" \
+              '[.assets[] | select(.name == $name)] | if length == 1 then .[0].id else error("release asset missing or duplicated: " + $name) end' \
+              <<< "$release"
+          }
+          checksums="$RUNNER_TEMP/copilot-cli-SHA256SUMS.txt"
+          gh api -H 'Accept: application/octet-stream' \
+            "repos/github/copilot-cli/releases/assets/$(asset_id SHA256SUMS.txt)" > "$checksums"
+          bash rust/scripts/snapshot-bundled-cli-version.sh --checksums "$checksums"
+          bash rust/scripts/snapshot-bundled-in-process-version.sh --checksums "$checksums"
+          mkdir -p "$BUNDLED_CLI_CACHE_DIR"
+          # This job runs on Ubuntu x86_64. The SDK verifies both cached hashes.
+          for asset in copilot-linux-x64.tar.gz "github-copilot-$version-linux-x64.tgz"; do
+            gh api -H 'Accept: application/octet-stream' \
+              "repos/github/copilot-cli/releases/assets/$(asset_id "$asset")" \
+              > "$BUNDLED_CLI_CACHE_DIR/v$version-$asset"
+          done
 
       - name: Validate patched SDK
         if: steps.replay.outputs.changed == 'true'
